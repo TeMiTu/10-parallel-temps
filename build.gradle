@@ -1,0 +1,45 @@
+plugins {
+    id 'application'
+}
+
+java {
+    sourceCompatibility = 21
+    targetCompatibility = 21
+}
+
+compileJava {
+    options.encoding = "UTF-8"
+}
+
+compileTestJava {
+    options.encoding = "UTF-8"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation("org.junit.jupiter:junit-jupiter:5.+")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.+")
+}
+
+application {
+    mainClass = 'temps.Main'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+
+    testLogging {
+        events = ["passed", "skipped", "failed"]
+        exceptionFormat = "full"
+        showStandardStreams = true
+    }
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': application.mainClass
+    }
+}

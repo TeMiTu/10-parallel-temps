@@ -1,0 +1,249 @@
+package temps;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.util.OptionalDouble;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+@Timeout(15)
+public class TemperatureWorkerTest {
+
+    @Test
+    void workerIsAThreadWithAVolatileCheckedCounter() throws NoSuchFieldException {
+        assertEquals(Thread.class, TemperatureWorker.class.getSuperclass());
+
+        Field checked = TemperatureWorker.class.getDeclaredField("checked");
+        assertEquals(int.class, checked.getType());
+        assertTrue(Modifier.isVolatile(checked.getModifiers()), "checked must be volatile");
+    }
+
+    @Test
+    void checkedAdvancesOneReadingAtATimeAndTheRunningAverageChanges() throws InterruptedException {
+        StepSource source = new StepSource(10, 30, 20);
+        TemperatureWorker worker = new TemperatureWorker("Las Palmas", source);
+        worker.start();
+
+        source.permits.release();
+        awaitChecked(worker, 1);
+        assertEquals(10.0, worker.average(), 0.0001);
+
+        source.permits.release();
+        awaitChecked(worker, 2);
+        double afterTwo = worker.average();
+        assertEquals(20.0, afterTwo, 0.0001);
+        assertNotEquals(10.0, afterTwo);
+
+        source.permits.release();
+        awaitChecked(worker, 3);
+        assertEquals(20.0, worker.average(), 0.0001);
+
+        source.permits.release();
+        worker.join(2_000);
+        assertFalse(worker.isAlive());
+        assertEquals(source.size(), worker.checked);
+        assertEquals(Thread.State.TERMINATED, worker.getState());
+    }
+
+    @Test
+    void twoWorkersRunAtTheSameTimeOnDifferentThreads() throws InterruptedException {
+        GateSource lasPalmasSource = new GateSource();
+        GateSource helsinkiSource = new GateSource();
+        TemperatureWorker lasPalmas = new TemperatureWorker("Las Palmas", lasPalmasSource);
+        TemperatureWorker helsinki = new TemperatureWorker("Helsinki", helsinkiSource);
+
+        lasPalmas.start();
+        helsinki.start();
+
+        assertTrue(lasPalmasSource.entered.await(2, TimeUnit.SECONDS), "Las Palmas worker did not start");
+        assertTrue(helsinkiSource.entered.await(2, TimeUnit.SECONDS), "Helsinki worker did not start");
+        assertTrue(lasPalmas.isAlive());
+        assertTrue(helsinki.isAlive());
+        assertNotEquals(lasPalmas.threadId(), helsinki.threadId());
+        assertNotEquals(Thread.currentThread().threadId(), lasPalmas.threadId());
+        assertNotEquals(Thread.currentThread().threadId(), helsinki.threadId());
+
+        lasPalmasSource.release.countDown();
+        helsinkiSource.release.countDown();
+        lasPalmas.join(2_000);
+        helsinki.join(2_000);
+        assertEquals(Thread.State.TERMINATED, lasPalmas.getState());
+        assertEquals(Thread.State.TERMINATED, helsinki.getState());
+    }
+
+    @Test
+    void queueSourceCanBeFedFromOutsideTheWorker() throws InterruptedException {
+        QueueTemperatureSource source = new QueueTemperatureSource(3);
+        TemperatureWorker worker = new TemperatureWorker("Helsinki", source);
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        PrintStream original = System.out;
+        System.setOut(new PrintStream(captured));
+        try {
+            worker.start();
+            source.publish(4);
+            source.publish(6);
+            source.publish(11);
+            source.close();
+            worker.join(2_000);
+        } finally {
+            System.setOut(original);
+        }
+
+        assertEquals("", captured.toString(), "the worker must not print");
+        assertEquals(3, worker.checked);
+        assertEquals(7.0, worker.average(), 0.0001);
+    }
+
+    @Test
+    void bundledAveragesAreInRangeAndHelsinkiHasTheWiderTolerance() throws Exception {
+        double[] lasPalmas = TemperatureData.readValues(TemperatureData.LAS_PALMAS);
+        double[] helsinki = TemperatureData.readValues(TemperatureData.HELSINKI);
+        assertEquals(366, lasPalmas.length);
+        assertEquals(366, helsinki.length);
+
+        TemperatureWorker lasPalmasWorker = new TemperatureWorker("Las Palmas", new MemorySource(lasPalmas));
+        TemperatureWorker helsinkiWorker = new TemperatureWorker("Helsinki", new MemorySource(helsinki));
+        lasPalmasWorker.start();
+        helsinkiWorker.start();
+        lasPalmasWorker.join(2_000);
+        helsinkiWorker.join(2_000);
+
+        assertEquals(lasPalmas.length, lasPalmasWorker.checked);
+        assertEquals(helsinki.length, helsinkiWorker.checked);
+
+        double lasPalmasMean = mean(lasPalmas);
+        double helsinkiMean = mean(helsinki);
+        assertEquals(lasPalmasMean, lasPalmasWorker.average(), 0.05, "Las Palmas tolerance is tight");
+        assertEquals(helsinkiMean, helsinkiWorker.average(), 0.5, "Helsinki tolerance is wider");
+
+        assertTrue(lasPalmasWorker.average() >= 19.0 && lasPalmasWorker.average() <= 24.0,
+                "Las Palmas average " + lasPalmasWorker.average());
+        assertTrue(helsinkiWorker.average() >= 3.0 && helsinkiWorker.average() <= 9.0,
+                "Helsinki average " + helsinkiWorker.average());
+
+        TemperatureWorker earlyHelsinki = new TemperatureWorker("Helsinki",
+                new MemorySource(copy(helsinki, 55)));
+        earlyHelsinki.start();
+        earlyHelsinki.join(2_000);
+        assertEquals(55, earlyHelsinki.checked);
+        assertTrue(Math.abs(earlyHelsinki.average() - helsinkiWorker.average()) > 1.0,
+                "the running average must change as more Helsinki readings are processed");
+    }
+
+    @Test
+    void emptySourceLeavesTheAverageAtZero() throws InterruptedException {
+        TemperatureWorker worker = new TemperatureWorker("Helsinki", new MemorySource(new double[0]));
+        worker.start();
+        worker.join(2_000);
+        assertEquals(0, worker.checked);
+        assertEquals(0.0, worker.average(), 0.0);
+    }
+
+    private static void awaitChecked(TemperatureWorker worker, int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (worker.checked != expected) {
+            if (System.nanoTime() > deadline) {
+                fail("checked was " + worker.checked + ", expected " + expected);
+            }
+            Thread.onSpinWait();
+        }
+    }
+
+    private static double mean(double[] values) {
+        double sum = 0;
+        for (double value : values) {
+            sum += value;
+        }
+        return sum / values.length;
+    }
+
+    private static double[] copy(double[] values, int length) {
+        double[] prefix = new double[length];
+        System.arraycopy(values, 0, prefix, 0, length);
+        return prefix;
+    }
+
+    private static final class MemorySource implements TemperatureSource {
+        private final double[] values;
+        private int index;
+
+        MemorySource(double[] values) {
+            this.values = values;
+        }
+
+        @Override
+        public synchronized OptionalDouble next() {
+            if (index >= values.length) {
+                return OptionalDouble.empty();
+            }
+            return OptionalDouble.of(values[index++]);
+        }
+
+        @Override
+        public int size() {
+            return values.length;
+        }
+    }
+
+    private static final class StepSource implements TemperatureSource {
+        private final double[] values;
+        private final Semaphore permits = new Semaphore(0);
+        private int index;
+
+        StepSource(double... values) {
+            this.values = values;
+        }
+
+        @Override
+        public OptionalDouble next() {
+            try {
+                permits.acquire();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                return OptionalDouble.empty();
+            }
+            if (index >= values.length) {
+                return OptionalDouble.empty();
+            }
+            return OptionalDouble.of(values[index++]);
+        }
+
+        @Override
+        public int size() {
+            return values.length;
+        }
+    }
+
+    private static final class GateSource implements TemperatureSource {
+        private final CountDownLatch entered = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public OptionalDouble next() {
+            entered.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+            return OptionalDouble.empty();
+        }
+
+        @Override
+        public int size() {
+            return 1;
+        }
+    }
+}
