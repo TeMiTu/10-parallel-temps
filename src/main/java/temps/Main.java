@@ -1,6 +1,7 @@
 package temps;
 
 import java.io.IOException;
+import java.util.Locale;
 
 /**
  * Draws two ASCII temperature bars while Las Palmas and Helsinki temperatures
@@ -68,13 +69,71 @@ public class Main {
      * @param secondAverage running average of the second city, in degrees Celsius
      * @return the two lines separated by {@code \n}, without a trailing newline
      *         and without terminal control codes
+     * 
+     * Yksi rivi kootaan näin:
+
+kaupungin nimi täytetään 10 merkin levyiseksi ja sen jälkeen tulee välilyönti ja |,
+palkki on Main.BAR_WIDTH merkkiä (50) ja sen perään |,
+jos checked on 0, palkki on pelkkiä --merkkejä,
+muuten täyttöä on Main.temperatureBarLength(average) kappaletta merkkiä # ja loput ovat -,
+keskiarvo tulostetaan yhdellä desimaalilla, viiden merkin levyisenä, 
+luokalla Locale.ROOT, ja heti perään °C,
+rivinumero neljän merkin levyisenä (0, 120k, 1.5M),
+prosentti checked * 100 / total kolmen merkin levyisenä ja heti perään %.
+Jos total on 0, prosentti on 0. Tarkempi kuvaus on metodin kommenteissa.
+
+Arvioinnissa ajetaan testiluokka ShowProgressTest. Testit tarkistavat 
+tyhjän palkin, 0 °C:n kohdan asteikolla, korkean ja matalan ruudun sekä sen, 
+että palkin pituus seuraa keskiarvoa.
      */
+    
+    
+
+    
+
+    public static String rivinOtsikko(int checked){
+        if(checked >= 1_000_000){
+            return String.format(Locale.ROOT, "%.1fM", checked / 1_000_000.0);
+        }
+        else if(checked > 1_000){
+            return (checked / 1_000) + "k";
+        }
+        else{
+            return Integer.toString(Math.max(checked, 0));
+        }
+    }
+
+    private static int prosentti(int checked, int total){
+        if(total <= 0 || checked <= 0){
+            return 0;
+        }
+        else if(checked >= total){
+            return 100;
+        }
+        else{
+            return (int)((long)checked * 100 / total);
+        }
+        
+    }
+
+    private static String rivinKirjoitus(String city, int checked, int total, double average){
+        int filled = checked <= 0 ? 0 : temperatureBarLength(average);
+        String palkki = "#".repeat(filled) + "-".repeat(BAR_WIDTH - filled);
+
+        //formatointi luo tilan tekstille ja muokkaa tulosteen halutuksi. Prosenttimerkki ja numero määräävät kohdan koon. 
+        return String.format(Locale.ROOT, "%-10s |%s|%5.1f°C %4s %3d%%", 
+        city, palkki,average, rivinOtsikko(checked), prosentti(checked, total));
+        
+    }
+
+    
     public static String showProgress(
             String firstCity, int firstChecked, int firstTotal, double firstAverage,
             String secondCity, int secondChecked, int secondTotal, double secondAverage) {
-        // TODO: build the two-line frame described in the readme and above.
         // An empty bar (checked == 0) is not the same as a 0 °C average.
-        return "";
+        return rivinKirjoitus(firstCity, firstChecked, firstTotal, firstAverage) 
+        + "\n" 
+        + rivinKirjoitus(secondCity, secondChecked, secondTotal, secondAverage);
     }
 
     /**
