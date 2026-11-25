@@ -201,10 +201,21 @@ että palkin pituus seuraa keskiarvoa.
      * @throws IOException          if a temperature file cannot be read
      * @throws InterruptedException if the sleep or a join is interrupted
      */
+
+    public static void piirra(String frame, boolean firstFrame){
+        StringBuilder out = new StringBuilder();
+        if(!firstFrame){
+            out.append("\033[2A\r");
+        }
+        for(String line : frame.split("\n")){
+            out.append(line).append("\033[K\n");
+        }
+        System.out.println(out);
+        System.out.flush();
+    }
     public static String runChart(long redrawDelayMillis, long feedDelayMillis, int rows)
             throws IOException, InterruptedException {
         /*
-         * TODO: open both files with TemperatureData.open(file, feedDelayMillis, rows).
          * Start one TemperatureWorker("Las Palmas", ...) and one
          * TemperatureWorker("Helsinki", ...).
          *
@@ -216,7 +227,36 @@ että palkin pituus seuraa keskiarvoa.
          * When both workers have finished, call join() on both. Then read
          * average() and return the final frame from showProgress.
          */
-        return "";
+        TemperatureSource lasPalSource = TemperatureData.
+            open(TemperatureData.LAS_PALMAS, feedDelayMillis, rows);
+        TemperatureSource helsinkiSource = TemperatureData.
+            open(TemperatureData.HELSINKI, feedDelayMillis, rows);
+
+        TemperatureWorker lasPalmas = new TemperatureWorker("Las Palmas", lasPalSource);
+        TemperatureWorker helsinki = new TemperatureWorker("Helsinki", helsinkiSource);
+        lasPalmas.start();
+        helsinki.start();
+
+        boolean firstFrame = true;
+        while(lasPalmas.isAlive() || helsinki.isAlive()){
+            piirra(showProgress(
+                lasPalmas.getCity(), lasPalmas.checked,
+                lasPalSource.size(), lasPalmas.runningAverage, 
+                helsinki.getCity(), helsinki.checked, 
+                helsinkiSource.size(), helsinki.runningAverage), firstFrame);
+                firstFrame = false;
+                Thread.sleep(redrawDelayMillis);
+        }
+        lasPalmas.join();
+        helsinki.join();
+
+        String finalFrame = showProgress(lasPalmas.getCity(), lasPalmas.checked, 
+        lasPalSource.size(), lasPalmas.average(), 
+        helsinki.getCity(), helsinki.checked, 
+        helsinkiSource.size(), helsinki.average());
+        piirra(finalFrame, firstFrame);
+
+        return finalFrame;
     }
 
     /**
